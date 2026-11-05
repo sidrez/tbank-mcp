@@ -147,7 +147,7 @@ def _success():
     print("  MCP читает этот же файл — путь совпадает без ручной настройки.")
     print("  Запусти своего MCP-клиента (Claude Code и т.п.).")
     print("  Пароль НЕ передан агенту — он работает с сохранённой сессией.")
-    print("  Тулы: list_accounts, grocery_search, transfer, ...")
+    print("  Read-only тулы: list_accounts, list_operations, spending_categories, ...")
 
 
 if __name__ == "__main__":

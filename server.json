@@ -1,20 +1,11 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.icyberdeveloper/tbank-mcp",
-  "title": "T-Bank MCP",
-  "description": "T-Bank (Т-Банк) mobile banking: accounts, cards, transfers, bill pay, grocery, tickets, travel",
+  "name": "io.github.sidrez/tbank-mcp-readonly",
+  "title": "T-Bank Read-only MCP",
+  "description": "Read-only T-Bank MCP: accounts, operations, cards and investments. No payments or transfers.",
   "repository": {
-    "url": "https://github.com/icyberdeveloper/tbank-mcp",
-    "source": "github",
-    "id": "1310450222"
+    "url": "https://github.com/sidrez/tbank-mcp",
+    "source": "github"
   },
-  "version": "0.2.2",
-  "packages": [
-    {
-      "registryType": "pypi",
-      "identifier": "tbank-mcp",
-      "version": "0.2.2",
-      "transport": { "type": "stdio" }
-    }
-  ]
+  "version": "0.3.0"
 }

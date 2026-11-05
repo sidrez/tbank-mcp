@@ -330,46 +330,13 @@ def _tools_taking_ctx():
 
 
 def test_schema_has_no_ctx():
-    listed = server.mcp._tool_manager.list_tools()
-    if inspect.isawaitable(listed):
-        listed = asyncio.run(listed)
-    tools = {t.name: t for t in listed}
-
-    ctx_tools = _tools_taking_ctx()
-    check(ctx_tools, "no ctx-taking tool was discovered at all — the registry moved "
-                     "and this test would now pass against any schema whatsoever")
-    missing = [n for n in PAYING if n not in ctx_tools]
-    check(not missing,
-          f"a paying tool no longer takes ctx — without it there is no button and "
-          f"no confirmation: {missing}")
-
-    # confirm_payment takes no ctx (its OTP path is plain text), and is checked
-    # anyway: it is the tool that releases a payment the bank is holding, so a
-    # `ctx` turning up in ITS schema would be an agent-supplied confirmation.
-    for name in sorted(set(ctx_tools) | {"confirm_payment"}):
-        tool = tools.get(name)
-        check(tool is not None, f"{name}: registered, but missing from the list of "
-                                f"tools agents are shown")
-        if tool is None:
-            continue
-        schema = tool.parameters
-        props = schema.get("properties", {})
-        check("ctx" not in props,
-              f"{name}: ctx leaked into the agent schema: {list(props)}")
-        check("ctx" not in schema.get("required", []),
-              f"{name}: ctx is demanded of the agent: {schema.get('required')}")
-
-    tr = tools["transfer_requisites"].parameters.get("properties", {})
-    check(set(tr) == {"amount", "qr", "comment", "account_number", "bik", "inn",
-                      "name", "kpp", "corr_account", "bank_name", "nds",
-                      "personal_account", "from_account", "force"},
-          f"transfer_requisites property set changed: {sorted(tr)}")
-    cp = tools["confirm_payment"].parameters
-    check("otp" not in cp.get("required", []),
-          f"otp must be optional: {cp.get('required')}")
-    check("attempt_id" in cp.get("required", []), "attempt_id must stay required")
-    print(f"  schema: no ctx in any of the {len(ctx_tools)} tools that take one "
-          f"({', '.join(sorted(ctx_tools))}), otp optional, property set pinned")
+    tools = {t.name: t for t in server.mcp._tool_manager.list_tools()}
+    for tool in tools.values():
+        check("ctx" not in tool.parameters.get("properties", {}), "ctx must not be model supplied")
+    for name in PAYING:
+        check(name not in tools, f"read-only MCP must not expose {name}")
+    check("confirm_payment" not in tools, "payment confirmation is not exposed")
+    print("  schema: read-only registry excludes all paying tools and ctx")
 
 
 # ---- 10. the injected ctx never reaches the trace --------------------------

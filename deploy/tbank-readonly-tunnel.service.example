@@ -1,0 +1,23 @@
+# Install as ~/.config/systemd/user/tbank-readonly-tunnel.service.
+# Replace /ABSOLUTE paths and configure tunnel-client under the same user first.
+[Unit]
+Description=Private read-only T-Bank MCP tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/ABSOLUTE/PATH/TO/tbank-mcp
+Environment=TBANK_SESSION=/ABSOLUTE/PRIVATE/DATA/account-a/session.json
+Environment=TBANK_CA_BUNDLE=/ABSOLUTE/PRIVATE/DATA/account-a/bundle.pem
+Environment=TBANK_TRACE=0
+EnvironmentFile=%h/.config/tbank-readonly/tunnel.env
+ExecStart=/ABSOLUTE/PATH/TO/tunnel-client run --profile tbank-a
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

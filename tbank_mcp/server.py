@@ -28,8 +28,12 @@ from .client import (MobileSession, TbankApiError, SessionExpired,
                      cart_quantity_conflicts, format_cart_conflicts)
 from .endpoints import VERTICALS, APP_VERSION
 from .observability import redact_text, redact_reflected_secrets, _redact_value
+from .readonly import READONLY_TOOLS, READONLY_SECTIONS, ReadOnlyMobileSession
 
-mcp = FastMCP("tbank")
+mcp = FastMCP("tbank-readonly", instructions=(
+    "Только чтение банковских данных. Вход выполняется пользователем локально "
+    "через tbank-mcp-login. Никогда не запрашивай пароль, PIN или SMS-код в чате. "
+    "Оплаты, переводы и любые изменения недоступны."))
 
 # Every @mcp.tool() below is recorded. Done by replacing the decorator ONCE rather
 # than touching 57 functions: a per-tool opt-in is a list somebody has to remember to
@@ -202,7 +206,13 @@ def _annotations_for(name: str) -> ToolAnnotations:
 
 def _traced_tool(*a, **kw):
     def register(fn):
+        # Explicit allowlist: new upstream tools are never exposed implicitly.
+        # Retain local helpers for the login CLI and upstream regression tests.
+        if fn.__name__ not in READONLY_TOOLS:
+            return trace.wrap(fn)
         title, _ = TOOL_KINDS.get(fn.__name__, ("", ""))
+        if TOOL_KINDS[fn.__name__][1] != READ:
+            raise RuntimeError("Read-only tool must be classified READ")
         opts = {"title": title, "annotations": _annotations_for(fn.__name__), **kw}
         return _untraced_tool(*a, **opts)(trace.wrap(fn))
     return register
@@ -594,7 +604,7 @@ def _load_session():
         fields = MobileSession.__dataclass_fields__
         keep = {k for k in fields if not k.startswith("_")} | {"_minted_at"}
         d = {k: v for k, v in d.items() if k in keep}
-        s = MobileSession(**d)
+        s = ReadOnlyMobileSession(**d)
         mode = oct(os.stat(_SESSION_FILE).st_mode & 0o777)
         print(f"[tbank] session loaded: {_SESSION_FILE} ({os.path.getsize(_SESSION_FILE)} bytes, {mode})", file=sys.stderr)
         return s
@@ -630,10 +640,10 @@ def _require():
             raise TbankApiError(
                 "SESSION_UNREADABLE",
                 f"файл сессии есть, но не читается ({_SESSION_FILE}) — вероятно "
-                f"повреждён. Выполни login(phone)+confirm_otp(otp), это перезапишет "
+                f"повреждён. Выполни tbank-mcp-login в своём терминале, это перезапишет "
                 f"его. (Если ты только что логинился — сессия могла быть затёрта.)")
         raise TbankApiError("NO_SESSION",
-            "Сначала вызови login(phone).")
+            "Сначала выполни tbank-mcp-login в своём терминале. Не вводи секреты в чат.")
     return _session
 
 
@@ -659,7 +669,7 @@ def _err(e):
         # number that redact_text's value-pattern regexes alone would miss.
         return _cut(_redact_value(str(msg)), 300)
     if isinstance(e, SessionExpired):
-        return f"SESSION EXPIRED: call refresh_session(). {safe(e.message)}"
+        return f"SESSION EXPIRED: повтори tbank-mcp-login локально. {safe(e.message)}"
     if isinstance(e, TbankApiError):
         return f"API error ({e.result_code}): {safe(e.message)}"
     return f"{type(e).__name__}: {safe(e)}"
@@ -1093,7 +1103,7 @@ def push_unread_count() -> str:
 def list_accounts() -> str:
     """Счета, балансы и карты каждого счёта (id + ucid).
 
-    ucid — для card_limits/card_requisites, id — для card_operations. Полный
+    ucid — для card_limits, id карты — для card_operations. Полный
     список карт с типом и статусом — list_cards()."""
     try:
         s = _require(); s.ensure_fresh()
@@ -1212,47 +1222,18 @@ def operations_histogram(account_id: str = "", days: int = 30,
 
 @mcp.tool()
 def get_data(section: str, arg: str = "", days: int = 30, max_chars: int = 5000) -> str:
-    """Универсальный getter. section = subscriptions | subscription_bills |
-    credit_schedule | credit_rating |
-    statements | invoices | templates | contacts | cards | loans | autopayments |
-    sbp | sbp_me2me | promocodes |
-    offers | gifts | services | bundles | manager | merchant_subs | profile | homes |
-    cars | shortcuts | finhealth_total | finhealth_turnover | finhealth_presets |
-    finhealth_invest | invest_accounts | invest_offers | invest_yield | pension |
-    broker_margin | shared | shared_owned | business_info | appointments |
-    account_details | full_debt_amount | statement_exist.
-    Секция вне списка — отказ со списком допустимых, а не запрос наугад.
-    Платёжный QR разбирает payment_qr(qr), не эта секция.
+    """Чтение банковских данных по закрытому списку разделов.
 
-    ⚠️ Счета к оплате лежат в ДВУХ разных местах, и «пусто» в одном не значит, что
-    счетов нет:
-      invoices           — выставленные счета (e-invoicing). Часто пусто.
-      subscription_bills — счета по подпискам на ЖКХ и прочие услуги. Именно здесь
-                           обычно и лежит неоплаченная квитанция, вместе с
-                           paymentFields, которые нужны pay_bill().
-    Проверяй ОБА, прежде чем сказать «неоплаченных счетов нет».
-
-    СЕМИ секциям НУЖЕН arg — без него тул не вернёт пустоту, а поднимет ошибку:
-      sbp_me2me  — arg = СВОЙ телефон. Отвечает, из каких банков клиент может
-                   стянуть собственные деньги по СБП. Это НЕ поиск получателя —
-                   для него transfer_sbp_resolve(phone).
-      providers  — arg = список id через запятую («fns-rf,gibdd-online-rf»).
-                   Перечислить все провайдеры этим эндпоинтом нельзя, только найти
-                   известные по id.
-      requisites — arg = телефон. Обычно вместо этого нужен transfer_sbp_resolve(phone);
-                   а реквизиты СВОЕГО счёта — это account_requisites(account_id).
-      statements — arg = номер счёта из list_accounts(). days задаёт окно выписки
-                   (по умолчанию 30 — раньше это окно было зашито и нигде не
-                   упоминалось; другие секции days не принимают).
-      account_details  — arg = id счёта из list_accounts().
-      full_debt_amount — arg = номер счёта (полная сумма долга по кредиту).
-      statement_exist  — arg = номер счёта (есть ли выписка за период).
-
-    max_chars — кап ответа в символах (по умолчанию 5000; 0 = весь JSON без
-    обрезки). Обрезка всегда помечена заголовком «ПОКАЗАНО X из Y».
-
-    (invest_portfolio/operations/securities и account_requisites — отдельные тулы.)"""
+    section: subscriptions, subscription_bills, credit_schedule, credit_rating,
+    statements, invoices, templates, cards, loans, autopayments, sbp, merchant_subs,
+    finhealth_presets, finhealth_total, finhealth_turnover, finhealth_invest,
+    invest_accounts, account_details, full_debt_amount, statement_exist.
+    statements/account_details/full_debt_amount/statement_exist требуют arg = id счёта.
+    days задаёт период выписки. max_chars=0 отключает обрезку ответа.
+    """
     try:
+        if section.lower() not in READONLY_SECTIONS:
+            raise TbankApiError("READ_ONLY_SECTION", "Разрешены: " + ", ".join(sorted(READONLY_SECTIONS)))
         s = _require(); s.ensure_fresh()
         return _json_out(s.get_data(section, arg, days=days), max_chars)
     except Exception as e:
@@ -7593,56 +7574,16 @@ def _flow_sections() -> list[tuple[str, str]]:
 
 @mcp.tool()
 def flows(topic: str = "") -> str:
-    """Гид по флоу: порядок вызовов для конкретной задачи.
-
-    topic — что тебе нужно, своими словами: «продукты», «перевод», «билеты»,
-    «карты», «заказы», «кбжу», «инвест», «кредит», «чат», «поиск», «логин»,
-    «поезд», «самолёт», «отель», «поездки», «маркетплейс».
-    Без аргумента — список тем и общие правила (там же про тулы с реальными
-    деньгами). Отдаёт только подходящие разделы, а не весь файл."""
-    sections = _flow_sections()
-    if not sections:
-        return f"docs/FLOWS.md not found at {_FLOWS_PATH}"
-
-    def body_of(name_part: str) -> str:
-        for title, body in sections:
-            if name_part.lower() in title.lower():
-                return f"## {title}\n{body}"
-        return ""
-
-    q = topic.strip().lower()
-    if not q:
-        toc = "\n".join(f"- {t}" for t, _ in sections if not t.lower().startswith("notes"))
-        return ("Разделы docs/FLOWS.md — вызови flows(topic) с нужным:\n" + toc +
-                "\n\n" + body_of("Notes"))
-
-    tokens = [w for w in re.split(r"[^\wа-яёА-ЯЁ]+", q) if len(w) > 2]
-    scored = []
-    for title, body in sections:
-        hay = (title + " " + _FLOW_KEYWORDS.get(
-            next((k for k in _FLOW_KEYWORDS if k in title.lower()), ""), "")).lower()
-        # Whole words, not substrings. «чат» is a substring of «получатель», which
-        # is in the transfer keyword list — so the tool's own advertised topic
-        # «чат» returned the MONEY flow first, ahead of the messenger section.
-        words = set(re.findall(r"\w+", hay))
-        score = sum(1 for w in tokens if w in words)
-        if score:
-            scored.append((score, title, body))
-    if not scored:
-        toc = "\n".join(f"- {t}" for t, _ in sections if not t.lower().startswith("notes"))
-        return (f"По запросу «{topic}» раздел не найден. Есть эти:\n" + toc +
-                "\n\nВызови flows(topic) с одним из них.")
-    scored.sort(key=lambda x: -x[0])
-    out = "\n\n".join(f"## {t}\n{b}" for _, t, b in scored[:3])
-    # Say what was dropped. This is the tool whose whole job is telling an agent
-    # which calls to make, and it silently kept the top three — in one real query
-    # the section it dropped was the ticket flow, the one with the money in it.
-    rest = [t for _, t, _ in scored[3:]]
-    if rest:
-        out += ("\n\nЕщё подошли, но не показаны: "
-                + "; ".join(rest)
-                + ". Вызови flows(\"<название>\") для любого из них.")
-    return out
+    """Справка по read-only MCP. topic — необязательная тема."""
+    return ("Только чтение. Сначала list_accounts(), затем list_operations(account_id), "
+            "spending_categories(account_id) или operations_histogram(account_id). "
+            "Карты: list_cards(), card_limits(ucid), card_operations(card_id). "
+            "Реквизиты счёта: account_requisites(account_id). "
+            "Справки и страховки: bank_documents(), insurance_policies(). "
+            "Инвестиции: invest_accounts(), затем invest_portfolio, invest_operations, invest_securities. "
+            "Разделы get_data: " + ", ".join(sorted(READONLY_SECTIONS)) + ". "
+            "Вход и повторная авторизация — только локально через tbank-mcp-login. "
+            "Пароль, PIN и SMS-код никогда не вводятся в чат.")
 
 
 def main():

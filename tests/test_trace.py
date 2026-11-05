@@ -114,7 +114,7 @@ def test_the_wrapper_does_not_change_what_agents_see():
     comparing, rather than against a copy of the schemas pasted into this file, which
     would just be a second thing to keep in sync."""
     live = listed(server.mcp)
-    check(len(live) >= 57, f"expected the full tool surface, got {len(live)}")
+    check(len(live) == 17, f"expected the read-only tool surface, got {len(live)}")
 
     plain = FastMCP("plain")
     wrapped_count = 0
