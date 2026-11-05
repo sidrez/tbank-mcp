@@ -140,22 +140,15 @@ def test_a_paging_hint_points_at_the_argument_that_works():
 
 def test_flows_names_the_sections_it_dropped():
     out = server.flows("счета карты переводы продукты билеты чат")
-    shown = out.count("\n## ")
-    check(shown <= 3, f"flows still returns everything: {shown} sections")
-    check("Ещё подошли" in out,
-          f"the sections that matched and were dropped must be named — this is the "
-          f"tool that tells an agent what to call next: {out[-300:]!r}")
-    print("  flows: the dropped matches are named instead of vanishing")
+    check("Только чтение" in out, "flows must describe read-only mode")
+    check("list_accounts()" in out, "flows must name the account entry point")
+    check("transfer(" not in out and "pay_bill(" not in out, "flows must not suggest disabled tools")
 
 
 def test_flows_matches_whole_words():
-    """«чат» is a substring of «получатель», which is in the transfer keywords — so
-    the tool's own advertised topic returned the MONEY flow first."""
     out = server.flows("чат")
-    first = next((l for l in out.splitlines() if l.startswith("## ")), "")
-    check("Messenger" in first or "чат" in first.lower(),
-          f"flows('чат') must lead with the messenger section, got {first!r}")
-    print("  flows: topics match whole words, not substrings")
+    check("tbank-mcp-login" in out, "flows must explain local authentication")
+    check("messenger_send(" not in out, "chat writes are not part of this MCP")
 
 
 # ---- ids that were in the response and never printed ----------------------

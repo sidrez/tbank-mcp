@@ -50,6 +50,8 @@ SYSTEM_CA_CANDIDATES = [
     "/etc/pki/tls/certs/ca-bundle.crt",
     "/etc/ssl/ca-bundle.pem",
     "/etc/ssl/cert.pem",
+    # Windows has no Unix PEM store. Use Requests' packaged public roots there.
+    requests.certs.where(),
 ]
 ROOTS_DIR = os.path.join(_HERE, "ca", "roots")
 # The rebuilt bundle is a runtime artifact, not package data: site-packages may be

@@ -177,7 +177,7 @@ def test_err_redacts_the_sessionid():
     from tbank_mcp.client import SessionExpired
     exp = server._err(SessionExpired("SESSION_IS_ABSENT", f"at {url}"))
     check(sid not in exp, f"sessionid leaked through the SessionExpired branch: {exp}")
-    check("refresh_session" in exp, "the expiry branch must still name the recovery tool")
+    check("tbank-mcp-login" in exp, "expiry must direct the user to the local CLI")
 
     # The user's phone must not survive either — it rides as ?pointer= on SBP lookups.
     check("+79991234567" not in redact_text("https://x/v1/get_requisites?pointer=+79991234567"),
