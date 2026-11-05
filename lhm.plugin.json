@@ -1,7 +1,7 @@
 {
   "identifier": "sidrez-tbank-mcp-readonly",
   "name": "T-Bank Read-only MCP",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "description": "Read-only T-Bank MCP: accounts, operations, cards and investments. No payments or transfers.",
   "author": "icyberdeveloper",
   "authorUrl": "https://github.com/icyberdeveloper",

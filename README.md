@@ -36,7 +36,7 @@ Read-only версия [исходного T-Bank MCP](https://github.com/icyber
 Python 3.11 или новее. PowerShell / Windows:
 
 ```powershell
-git clone --branch readonly-chatgpt https://github.com/sidrez/tbank-mcp.git
+git clone https://github.com/sidrez/tbank-mcp.git
 cd tbank-mcp
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
@@ -46,7 +46,7 @@ py -3 -m venv .venv
 Linux / macOS:
 
 ```bash
-git clone --branch readonly-chatgpt https://github.com/sidrez/tbank-mcp.git
+git clone https://github.com/sidrez/tbank-mcp.git
 cd tbank-mcp
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
