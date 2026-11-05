@@ -189,6 +189,18 @@ wiring и registry в Hermes, секреты в Infisical. Не устанавл
 вручную поверх управляемой конфигурации. Команды ниже предназначены для отдельной
 самостоятельной установки, а не заменяют deployment engine Hermes.
 
+Для вашего Hermes: проект Infisical **Hermes**, environment **prod**, path **/**.
+Runtime key туннеля хранится как `TBANK_MCP_TUNNEL_API_KEY`; при запуске он
+отображается в требуемую tunnel-client переменную `CONTROL_PLANE_API_KEY`.
+Не создавайте пустую запись заранее. При наличии подходящего канонического
+ключа переиспользуйте его без дубликата после проверки прав Tunnels Read + Use.
+Добавление secret group и формирование scoped-файла в `/run/hermes-secrets`
+должны проходить через существующий `hermes-secrets-refresh.service` и deploy.
+Постоянный `tunnel.env` на таком VPS создавать не следует.
+Пароль банка и SMS/PIN в Infisical для работы MCP не нужны: вход интерактивный.
+Ротируемый `session.json` — закрытое runtime state с encrypted backup;
+не заменяйте его устаревающей копией из environment variable.
+
 ```bash
 mkdir -p ~/.config/systemd/user
 cp deploy/tbank-readonly-tunnel.service.example ~/.config/systemd/user/tbank-readonly-tunnel.service
