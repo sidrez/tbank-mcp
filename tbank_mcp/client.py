@@ -2180,6 +2180,8 @@ class MobileSession:
         password (kind='password'), get the auth code, exchange it at
         auth/token/mobile -> session. Captures SSO_SESSION. Chains the token
         from each step's response to the next."""
+        if kind in {"otp", "pin", "password"} and not str(value or "").strip():
+            raise TbankApiError("EMPTY_FACTOR", "Пустое значение не отправлено в банк.")
         if not self._login_cid:
             raise TbankApiError("NO_LOGIN", "call login(phone) first")
         base = {"Accept": "application/json", "User-Agent": "okhttp/4.12.0"}

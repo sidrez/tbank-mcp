@@ -74,7 +74,48 @@ def main():
     return login(args[0])
 
 
+class _LoginCancelled(Exception):
+    pass
+
+
+def _secret(prompt, env_name=None, *, numeric=False):
+    value = os.environ.get(env_name, "") if env_name else ""
+    if not value:
+        value = getpass.getpass(prompt)
+    if not value.strip():
+        raise _LoginCancelled()
+    if numeric:
+        value = value.strip()
+        if not re.fullmatch(r"[0-9]+", value):
+            raise ValueError("Код должен содержать только цифры; запрос не отправлен.")
+    return value
+
+
+def _failure(error):
+    # Bank payloads contain conversation identifiers. Keep them out of logs
+    # and of the user's copy/paste into support chats.
+    if isinstance(error, TbankApiError):
+        code = str(error.result_code)
+        code = code if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", code) else "BANK_ERROR"
+        print(f"    Банк не завершил вход ({code}). Сессия не сохранена.")
+    elif isinstance(error, ValueError):
+        print(f"    {error}")
+    else:
+        print(f"    Сбой соединения или входа ({type(error).__name__}). Сессия не сохранена.")
+
+
 def login(phone):
+    try:
+        return _login(phone)
+    except (_LoginCancelled, KeyboardInterrupt, EOFError):
+        print("\nВход отменён. Пустые значения в банк не отправлены.")
+        return 1
+    except Exception as error:
+        _failure(error)
+        return 1
+
+
+def _login(phone):
     s = srv._blank_session()
 
     # Step 1: login(phone) → SMS OTP
@@ -83,17 +124,18 @@ def login(phone):
         msg = s.login(phone)
         print(f"    {msg}")
     except Exception as e:
-        print(f"    ERROR: {e}")
+        _failure(e)
         return 1
 
     # Step 2: OTP from user (getpass — скрытый ввод)
-    otp = getpass.getpass("[2/3] SMS-код: ")
+    print("    Проверьте SMS и пуш-уведомления Т-Банка. Enter без кода отменяет вход.")
+    otp = _secret("[2/3] Код из SMS/пуша (скрытый ввод): ", numeric=True)
     try:
         s.confirm_step("otp", otp)
         print("    OTP принят.")
     except TbankApiError as e:
         if _next_step(e) != "password":
-            print(f"    ОШИБКА: {e}")
+            _failure(e)
             return 1
         # bank wants password — continue to step 3
 
@@ -107,24 +149,17 @@ def login(phone):
         return 0
 
     # Step 3: password (if bank asked)
-    if os.environ.get("TBANK_PASSWORD"):
-        password = os.environ["TBANK_PASSWORD"]
-        print("[3/3] Пароль из TBANK_PASSWORD env.")
-    else:
-        password = getpass.getpass("[3/3] Пароль (не отображается): ")
+    password = _secret("[3/3] Пароль (не отображается): ", "TBANK_PASSWORD")
 
     try:
         s.confirm_step("password", password)
     except TbankApiError as e:
         if _next_step(e) == "pin":
             print("    Банк просит PIN.")
-            if os.environ.get("TBANK_PIN"):
-                pin = os.environ["TBANK_PIN"]
-            else:
-                pin = getpass.getpass("    PIN (не отображается): ")
+            pin = _secret("    PIN (не отображается): ", "TBANK_PIN", numeric=True)
             s.confirm_step("pin", pin)
         else:
-            print(f"    ОШИБКА: {e}")
+            _failure(e)
             return 1
 
     srv._session = s

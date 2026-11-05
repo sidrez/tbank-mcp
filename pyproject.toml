@@ -1,6 +1,6 @@
 [project]
 name = "tbank-mcp"
-version = "0.3.1"
+version = "0.3.2"
 description = "Read-only MCP for T-Bank: accounts, operations and investments; private ChatGPT tunnel setup."
 readme = "README.md"
 requires-python = ">=3.11"

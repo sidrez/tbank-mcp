@@ -36,12 +36,18 @@ nginx публикует `https://HOST/tbank/mcp` и OAuth discovery-маршр�
 
 ```bash
 sudo systemctl stop hermes-tbank-mcp-http.service
+cd /var/lib/tbank-readonly
 sudo -u tbank-mcp env TBANK_SESSION=/var/lib/tbank-readonly/session.json TBANK_CA_BUNDLE=/var/lib/tbank-readonly/bundle.pem /opt/tbank-mcp/venv/bin/tbank-mcp-login +7XXXXXXXXXX
 sudo systemctl start hermes-tbank-mcp-http.service
 ```
 
 Замените телефон на свой. Введите запрошенные SMS/пароль/PIN только в терминале.
 Дождитесь сообщения «Сессия сохранена». Секреты в чат не отправляйте.
+Пустой Enter отменяет вход без отправки пустого кода. Проверяйте также пуши
+приложения Т-Банка. Если код не приходит, не повторяйте запросы подряд:
+проверьте связь, отключите VPN и обратитесь в поддержку банка.
+При недоступности API с VPS войдите на своём ПК и перенесите session.json по SSH
+в закрытый каталог состояния, затем перезапустите службу.
 При истечении сессии повторите эти команды.
 
 ## 3. Добавьте MCP в ChatGPT
