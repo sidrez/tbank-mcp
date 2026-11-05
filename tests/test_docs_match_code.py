@@ -36,7 +36,7 @@ class DocsTests(unittest.TestCase):
 
     def test_guide_and_template_exist_and_link(self):
         guide = (ROOT / "docs/CHATGPT_RU.md").read_text(encoding="utf-8")
-        for expected in ["Secure MCP Tunnel", "TBANK_SESSION", "несколько", "No authentication"]:
+        for expected in ["OAuth", "TBANK_SESSION", "несколько", "Infisical"]:
             self.assertIn(expected.lower(), guide.lower())
         self.assertTrue((ROOT / "deploy/tbank-readonly-tunnel.service.example").is_file())
 

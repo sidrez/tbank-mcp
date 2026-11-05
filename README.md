@@ -64,8 +64,9 @@ Chromium и браузер Playwright устанавливать не требу
 Локальные MCP-клиенты запускают `.venv/Scripts/tbank-mcp.exe` (Windows)
 или `.venv/bin/tbank-mcp` (Linux/macOS). Это stdio-сервер.
 JSON с `command` нельзя импортировать в ChatGPT web как удалённый сервер.
-Для ChatGPT используйте [приватный Secure MCP Tunnel](docs/CHATGPT_RU.md).
-Эта версия не открывает HTTP-порт и не реализует собственный OAuth-сервис.
+Для ChatGPT используйте [HTTPS endpoint на VPS с OAuth](docs/CHATGPT_RU.md).
+Команда `tbank-mcp-http` открывает только loopback HTTP endpoint и поддерживает
+OAuth/PKCE. OpenAI Platform и ключ OpenAI API для подключения не нужны.
 
 ## Как обеспечивается read-only
 

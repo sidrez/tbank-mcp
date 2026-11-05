@@ -1,6 +1,6 @@
 [project]
 name = "tbank-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "Read-only MCP for T-Bank: accounts, operations and investments; private ChatGPT tunnel setup."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,7 +27,10 @@ dependencies = [
   # server.py's first import is `from mcp.server.fastmcp import FastMCP`. A bare
   # `mcp>=1.2` resolves to 2.0.0 on a fresh install and dies with ModuleNotFoundError
   # before anything runs. Lifting the ceiling means porting server.py to the 2.0 API.
-  "mcp>=1.2,<2",
+  "mcp>=1.30,<2",
+  "cryptography>=44",
+  "starlette>=0.40,<2",
+  "uvicorn>=0.31",
   "requests>=2.32",
   "playwright>=1.40",
   # server.py imports pydantic directly (BaseModel for elicitation schemas,
@@ -43,6 +46,7 @@ Repository = "https://github.com/sidrez/tbank-mcp"
 
 [project.scripts]
 tbank-mcp = "tbank_mcp.server:main"
+tbank-mcp-http = "tbank_mcp.http_server:main"
 # The password/PIN never travel through the agent — first login happens in the
 # user's own terminal. A pip install must therefore ship the login CLI too, or
 # the server is unusable on a fresh device.
