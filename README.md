@@ -5,6 +5,8 @@ Read-only версия [исходного T-Bank MCP](https://github.com/icyber
 
 **[Пошаговое подключение к ChatGPT на русском →](docs/CHATGPT_RU.md)**
 
+[Автообновление и восстановление банковской сессии →](docs/SESSION_RENEWAL_RU.md)
+
 ## Что доступно
 
 | Инструмент | Данные |
