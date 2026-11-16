@@ -175,7 +175,8 @@ class OwnerOAuth:
                 f'<input type="hidden" name="csrf" value="{csrf}">'
                 '<label>Код подключения <input type="password" name="password" required autocomplete="off"></label>'
                 '<button type="submit">Разрешить чтение</button></form></html>')
-        response = HTMLResponse(page, headers={"Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'", "Referrer-Policy": "no-referrer"})
+        # Chromium проверяет form-action также для OAuth redirect после POST.
+        response = HTMLResponse(page, headers={"Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; form-action 'self' https://chatgpt.com; frame-ancestors 'none'; base-uri 'none'", "Referrer-Policy": "no-referrer"})
         response.set_cookie("tbank_csrf", csrf, secure=True, httponly=True, samesite="lax", max_age=600, path=urlsplit(self.issuer).path or "/")
         return response
 

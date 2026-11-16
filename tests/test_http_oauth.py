@@ -83,6 +83,21 @@ class OAuthTests(unittest.TestCase):
         self.assertEqual(len(tools), 17)
         self.assertNotIn("transfer", {t["name"] for t in tools})
 
+    def test_consent_policy_allows_chatgpt_form_redirect(self):
+        response = self.client.get("/authorize", params={
+            "client_id": self.client_id,
+            "redirect_uri": "https://chatgpt.com/connector/oauth/test-callback",
+            "response_type": "code", "code_challenge": self.challenge,
+            "code_challenge_method": "S256", "scope": "bank:read",
+            "resource": self.issuer + "/mcp",
+        }, follow_redirects=False)
+        consent = self.client.get(response.headers["location"])
+        policy = consent.headers["Content-Security-Policy"]
+        self.assertIn("form-action 'self' https://chatgpt.com;", policy)
+        self.assertIn("default-src 'none';", policy)
+        self.assertIn("frame-ancestors 'none';", policy)
+        self.assertIn("base-uri 'none'", policy)
+
     def test_password_csrf_and_audience(self):
         self.assertEqual(self.authorize(password="wrong").status_code, 403)
         self.assertEqual(self.authorize(csrf=False).status_code, 400)
