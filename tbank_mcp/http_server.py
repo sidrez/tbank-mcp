@@ -94,13 +94,15 @@ class Store:
 
 
 class OwnerOAuth:
-    def __init__(self, store, issuer, password):
+    def __init__(self, store, issuer, password, hermes_token=""):
         if len(password) < 32:
             raise ValueError("TBANK_MCP_OWNER_PASSWORD must contain at least 32 characters")
         self.store, self.issuer = store, issuer.rstrip("/")
         self.resource = self.issuer + "/mcp"
         self.password_hash = hashlib.sha256(password.encode()).digest()
         self.failed_logins = []
+        self.hermes_token = hermes_token
+        self.scopes = [SCOPE] + (["bank:transfer-own"] if os.environ.get("TBANK_ENABLE_OWN_TRANSFERS") == "1" else [])
 
     async def get_client(self, client_id):
         row = self.store.get("client", client_id)
@@ -114,8 +116,8 @@ class OwnerOAuth:
     async def authorize(self, client, params):
         if not allowed_redirect(params.redirect_uri) or params.resource != self.resource:
             raise AuthorizeError("invalid_request", "Invalid redirect URI or resource")
-        if set(params.scopes or [SCOPE]) != {SCOPE}:
-            raise AuthorizeError("invalid_scope", "Only bank:read is supported")
+        if SCOPE not in (params.scopes or [SCOPE]) or not set(params.scopes or [SCOPE]).issubset(self.scopes):
+            raise AuthorizeError("invalid_scope", "Unsupported bank scope")
         nonce = secrets.token_urlsafe(32)
         self.store.put("pending", nonce, {"client_id": client.client_id, "params": params.model_dump(mode="json")}, time.time() + 600)
         return self.issuer + "/consent?" + urlencode({"request": nonce})
@@ -154,6 +156,9 @@ class OwnerOAuth:
             return self.issue_tokens(client.client_id, scopes, refresh_token.resource, row[1])
 
     async def load_access_token(self, token):
+        if self.hermes_token and hmac.compare_digest(token, self.hermes_token):
+            return AccessToken(token=token, client_id="hermes-local", scopes=self.scopes,
+                               resource=self.resource, subject="owner")
         row = self.store.get("access", token)
         return AccessToken.model_validate(row[0]) if row else None
 
@@ -162,19 +167,25 @@ class OwnerOAuth:
 
     async def consent(self, request):
         nonce = request.query_params.get("request", "")
-        if not self.store.get("pending", nonce):
+        pending = self.store.get("pending", nonce)
+        if not pending:
             return HTMLResponse("Запрос истёк. Повторите подключение в ChatGPT.", status_code=400)
+        own = "bank:transfer-own" in (pending[0]["params"].get("scopes") or [SCOPE])
+        title = "Чтение и переводы между своими счетами" if own else "Только чтение"
+        policy = ("Доступны переводы между своими текущими и накопительными RUB-счетами без комиссии. "
+                  "Каждый перевод потребует подтверждения кнопкой в клиенте MCP. "
+                  if own else "Переводы и оплаты недоступны. ")
         csrf = secrets.token_urlsafe(32)
         self.store.put("csrf", csrf, {"nonce": nonce}, time.time() + 600)
         page = ('<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
-                '<title>Т-Банк — разрешение чтения</title><h1>Т-Банк: только чтение</h1>'
+                f'<title>Т-Банк — разрешение доступа</title><h1>Т-Банк: {title}</h1>'
                 '<p>Вы разрешаете выбранному аккаунту ChatGPT читать счета, операции и инвестиции владельца этого сервера.</p>'
-                '<p>Переводы и оплаты недоступны. Введите код подключения из Infisical TBANK_MCP_OWNER_PASSWORD. '
+                f'<p>{policy}Введите код подключения из Infisical TBANK_MCP_OWNER_PASSWORD. '
                 'Пароль банка, PIN и SMS-код здесь не нужны.</p><form method="post" action="consent">'
                 f'<input type="hidden" name="request" value="{html.escape(nonce)}">'
                 f'<input type="hidden" name="csrf" value="{csrf}">'
                 '<label>Код подключения <input type="password" name="password" required autocomplete="off"></label>'
-                '<button type="submit">Разрешить чтение</button></form></html>')
+                '<button type="submit">Разрешить указанный доступ</button></form></html>')
         # Chromium проверяет form-action также для OAuth redirect после POST.
         response = HTMLResponse(page, headers={"Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; form-action 'self' https://chatgpt.com; frame-ancestors 'none'; base-uri 'none'", "Referrer-Policy": "no-referrer"})
         response.set_cookie("tbank_csrf", csrf, secure=True, httponly=True, samesite="lax", max_age=600, path=urlsplit(self.issuer).path or "/")
@@ -212,31 +223,81 @@ class OwnerOAuth:
         return response
 
 
+def private_hermes_token():
+    filename = os.environ.get("TBANK_MCP_HERMES_TOKEN_FILE")
+    if not filename:
+        return ""
+    path = Path(filename)
+    if path.is_symlink():
+        raise ValueError("Hermes token must be a regular private file")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        token = path.read_text(encoding="utf-8").strip()
+    else:
+        token = "hermes_" + secrets.token_urlsafe(32)
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(token)
+            file.flush()
+            os.fsync(file.fileno())
+    if not re.fullmatch(r"hermes_[A-Za-z0-9_-]{43}", token):
+        raise ValueError("Invalid private Hermes token")
+    os.chmod(path, 0o600)
+    return token
+
+
 def create_app(issuer=None, password=None, key=None, state_path=None):
     issuer = issuer or os.environ["TBANK_MCP_PUBLIC_URL"]
     if urlsplit(issuer).scheme != "https":
         raise ValueError("Public issuer must use HTTPS")
     provider = OwnerOAuth(Store(state_path or os.environ["TBANK_MCP_OAUTH_DB"], key or os.environ["TBANK_MCP_STATE_KEY"]),
-                          issuer, password or os.environ["TBANK_MCP_OWNER_PASSWORD"])
-    mcp = FastMCP("tbank-readonly", instructions=server.mcp.instructions,
+                          issuer, password or os.environ["TBANK_MCP_OWNER_PASSWORD"], private_hermes_token())
+    own_enabled = os.environ.get("TBANK_ENABLE_OWN_TRANSFERS") == "1"
+    instructions = ("Т-Банк: чтение счетов/операций и переводы только между своими Current/Saving RUB-счетами. "
+                    "Для перевода: list_accounts → prepare_own_transfer → confirm_own_transfer. "
+                    "Последний инструмент показывает штатный диалог пользователю в клиенте MCP. "
+                    "Пароль, PIN и SMS-код никогда не запрашивать в чате. "
+                    "Текстовое да и аргументы модели не заменяют кнопку. При unknown/posting/checking/bank_confirmation "
+                    "не создавать повторный перевод; сверить операции в банке. Чужие переводы и оплаты недоступны."
+                    if own_enabled else server.mcp.instructions)
+    mcp = FastMCP("tbank-mcp" if own_enabled else "tbank-readonly", instructions=instructions,
         auth_server_provider=provider, auth=AuthSettings(issuer_url=AnyHttpUrl(provider.issuer),
             resource_server_url=AnyHttpUrl(provider.resource), validate_token_resource=True,
             required_scopes=[SCOPE], client_registration_options=ClientRegistrationOptions(enabled=True,
-                valid_scopes=[SCOPE], default_scopes=[SCOPE]), revocation_options=RevocationOptions(enabled=True)),
-        stateless_http=True, json_response=True, max_request_body_size=16384,
+                valid_scopes=provider.scopes, default_scopes=provider.scopes), revocation_options=RevocationOptions(enabled=True)),
+        stateless_http=len(provider.scopes) == 1, json_response=len(provider.scopes) == 1, max_request_body_size=16384,
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=True,
             allowed_hosts=[urlsplit(issuer).netloc, "127.0.0.1:*", "localhost:*"],
             allowed_origins=["https://chatgpt.com", issuer]))
     for tool in server.mcp._tool_manager.list_tools():
+        if own_enabled and tool.name == "flows":
+            continue
         mcp.add_tool(tool.fn, name=tool.name, title=tool.title, description=tool.description, annotations=tool.annotations)
+    if own_enabled:
+        from .own_transfers import install
+        install(mcp, provider, server._require)
+
+        @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True})
+        def flows(topic: str = "") -> str:
+            """Справка по чтению и подтверждаемым переводам между своими RUB-счетами."""
+            return instructions + "\n" + server.flows(topic).replace("Только чтение.", "Чтение данных:", 1)
     mcp.custom_route("/consent", methods=["GET"])(provider.consent)
     mcp.custom_route("/consent", methods=["POST"])(provider.approve)
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(request):
-        return JSONResponse({"status": "ok", "mode": "read-only", "tools": 17})
+        return JSONResponse({"status": "ok", "mode": "read-and-own-transfers" if own_enabled else "read-only",
+                             "tools": len(mcp._tool_manager.list_tools())})
 
     app = mcp.streamable_http_app()
+    if own_enabled:
+        # В metadata публикуем все поддержанные scopes, но для чтения по-прежнему
+        # достаточно bank:read. Проверка переводов выполняется внутри tool.
+        from mcp.server.auth.routes import create_protected_resource_routes
+        resource_routes = create_protected_resource_routes(AnyHttpUrl(provider.resource),
+            [AnyHttpUrl(provider.issuer)], scopes_supported=provider.scopes)
+        replacements = {r.path: r for r in resource_routes}
+        app.router.routes = [replacements.get(getattr(r, 'path', ''), r) for r in app.router.routes]
     # SDK 1.30's revocation model incorrectly requires client_secret even for
     # public PKCE clients. Keep SDK client authentication, accept its omission.
     async def revoke(request):

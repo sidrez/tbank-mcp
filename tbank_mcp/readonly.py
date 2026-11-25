@@ -105,9 +105,12 @@ class ReadOnlyHTTP(requests.Session):
 
 
 class ReadOnlyMobileSession(MobileSession):
+    def _new_http(self):
+        return ReadOnlyHTTP()
+
     def __post_init__(self):
         # Never restore a custom transport from a session file.
-        self._http = ReadOnlyHTTP()
+        self._http = self._new_http()
         super().__post_init__()
 
     def _fresh_jar(self):

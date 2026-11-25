@@ -7,8 +7,10 @@ OpenAI Platform, ключ OpenAI API и Secure MCP Tunnel для этого сп
 ## 1. Сервер
 
 Read-only MCP устанавливается из этого репозитория, не из исходного PyPI-пакета.
-В управляемом VPS Hermes код закрепляется в `components/tbank-mcp.yaml`,
+В управляемом VPS Hermes код закрепляется в `components/tbank-mcp.json`,
 а развёртывание проходит через deployment engine с backup.
+Опциональные собственные переводы и встроенное подтверждение описаны
+в [отдельной инструкции](OWN_TRANSFERS_RU.md).
 
 Команда `tbank-mcp-http` слушает только `127.0.0.1:8954`.
 nginx публикует `https://HOST/tbank/mcp` и OAuth discovery-маршруты.

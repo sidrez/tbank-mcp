@@ -604,7 +604,11 @@ def _load_session():
         fields = MobileSession.__dataclass_fields__
         keep = {k for k in fields if not k.startswith("_")} | {"_minted_at"}
         d = {k: v for k, v in d.items() if k in keep}
-        s = ReadOnlyMobileSession(**d)
+        session_type = ReadOnlyMobileSession
+        if os.environ.get("TBANK_ENABLE_OWN_TRANSFERS") == "1":
+            from .own_transfers import OwnTransferSession
+            session_type = OwnTransferSession
+        s = session_type(**d)
         mode = oct(os.stat(_SESSION_FILE).st_mode & 0o777)
         print(f"[tbank] session loaded: {_SESSION_FILE} ({os.path.getsize(_SESSION_FILE)} bytes, {mode})", file=sys.stderr)
         return s
@@ -614,6 +618,13 @@ def _load_session():
 
 
 def _require():
+    # Все HTTP-клиенты должны получить один объект до первой ротации токенов.
+    from .client import _MINT_LOCK
+    with _MINT_LOCK:
+        return _require_locked()
+
+
+def _require_locked():
     """The in-memory session — but NOT older than the file on disk.
 
     The server runs for hours; a re-login happens in another process (login_cli.py),

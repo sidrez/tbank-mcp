@@ -1,7 +1,7 @@
 [project]
 name = "tbank-mcp"
-version = "0.3.2"
-description = "Read-only MCP for T-Bank: accounts, operations and investments; HTTPS OAuth connection to ChatGPT."
+version = "0.4.0"
+description = "T-Bank MCP: reads and optional confirmed transfers between own RUB accounts; HTTPS OAuth and Hermes bridge."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -32,6 +32,7 @@ dependencies = [
   "starlette>=0.40,<2",
   "uvicorn>=0.31",
   "requests>=2.32",
+  "httpx>=0.28",
   "playwright>=1.40",
   # server.py imports pydantic directly (BaseModel for elicitation schemas,
   # create_model for the pay-bill form). It arrives transitively through mcp
