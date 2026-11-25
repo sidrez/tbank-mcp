@@ -1,7 +1,7 @@
 [project]
 name = "tbank-mcp"
-version = "0.4.0"
-description = "T-Bank MCP: reads and optional confirmed transfers between own RUB accounts; HTTPS OAuth and Hermes bridge."
+version = "0.4.1"
+description = "T-Bank MCP: reads and optional own RUB transfers with owner-selected execution policy; HTTPS OAuth and Hermes bridge."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

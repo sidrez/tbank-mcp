@@ -172,9 +172,14 @@ class OwnerOAuth:
             return HTMLResponse("Запрос истёк. Повторите подключение в ChatGPT.", status_code=400)
         own = "bank:transfer-own" in (pending[0]["params"].get("scopes") or [SCOPE])
         title = "Чтение и переводы между своими счетами" if own else "Только чтение"
-        policy = ("Доступны переводы между своими текущими и накопительными RUB-счетами без комиссии. "
-                  "Каждый перевод потребует подтверждения кнопкой в клиенте MCP. "
-                  if own else "Переводы и оплаты недоступны. ")
+        if own:
+            from .own_transfers import execution_policy
+            policy = ("Доступны переводы между своими текущими и накопительными RUB-счетами без комиссии. "
+                      + ("Прямая команда в чате разрешает реальное исполнение без дополнительной формы подтверждения. "
+                         if execution_policy() == 'chat' else
+                         "Каждый перевод потребует подтверждения кнопкой в клиенте MCP. "))
+        else:
+            policy = "Переводы и оплаты недоступны. "
         csrf = secrets.token_urlsafe(32)
         self.store.put("csrf", csrf, {"nonce": nonce}, time.time() + 600)
         page = ('<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
@@ -253,11 +258,20 @@ def create_app(issuer=None, password=None, key=None, state_path=None):
     provider = OwnerOAuth(Store(state_path or os.environ["TBANK_MCP_OAUTH_DB"], key or os.environ["TBANK_MCP_STATE_KEY"]),
                           issuer, password or os.environ["TBANK_MCP_OWNER_PASSWORD"], private_hermes_token())
     own_enabled = os.environ.get("TBANK_ENABLE_OWN_TRANSFERS") == "1"
+    if own_enabled:
+        from .own_transfers import execution_policy
+        chat_execution = execution_policy() == 'chat'
     instructions = ("Т-Банк: чтение счетов/операций и переводы только между своими Current/Saving RUB-счетами. "
-                    "Для перевода: list_accounts → prepare_own_transfer → confirm_own_transfer. "
-                    "Последний инструмент показывает штатный диалог пользователю в клиенте MCP. "
+                    + ("Для прямой команды перевести: list_accounts → prepare_own_transfer → execute_own_transfer. "
+                       "Исполнение реальное, без отдельной формы. Если пользователь просит только подготовку, "
+                       "проверку или расчёт, execute_own_transfer НЕ вызывать. Сумма и оба счёта должны быть явно "
+                       "выбраны пользователем; при неопределённости уточнить, не подставлять старые значения. "
+                       if chat_execution else
+                       "Для перевода: list_accounts → prepare_own_transfer → confirm_own_transfer. "
+                       "Последний инструмент показывает штатный диалог пользователю в клиенте MCP. "
+                       "Текстовое да и аргументы модели не заменяют кнопку. ") +
                     "Пароль, PIN и SMS-код никогда не запрашивать в чате. "
-                    "Текстовое да и аргументы модели не заменяют кнопку. При unknown/posting/checking/bank_confirmation "
+                    "При unknown/posting/checking/bank_confirmation "
                     "не создавать повторный перевод; сверить операции в банке. Чужие переводы и оплаты недоступны."
                     if own_enabled else server.mcp.instructions)
     mcp = FastMCP("tbank-mcp" if own_enabled else "tbank-readonly", instructions=instructions,
@@ -279,15 +293,21 @@ def create_app(issuer=None, password=None, key=None, state_path=None):
 
         @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True})
         def flows(topic: str = "") -> str:
-            """Справка по чтению и подтверждаемым переводам между своими RUB-счетами."""
-            return instructions + "\n" + server.flows(topic).replace("Только чтение.", "Чтение данных:", 1)
+            """Справка по чтению, выбранному режиму исполнения и собственным RUB-переводам."""
+            reading = server.flows(topic).replace('# T-Bank — только чтение', '# Т-Банк — чтение и собственные RUB-переводы', 1)
+            reading = reading.replace('Оплаты, переводы, бронирования, сообщения и любые изменения недоступны.',
+                'Другие переводы, оплаты, бронирования, сообщения и изменения недоступны. Собственные RUB-переводы — по правилам выше.')
+            return instructions + "\n" + reading
     mcp.custom_route("/consent", methods=["GET"])(provider.consent)
     mcp.custom_route("/consent", methods=["POST"])(provider.approve)
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(request):
-        return JSONResponse({"status": "ok", "mode": "read-and-own-transfers" if own_enabled else "read-only",
-                             "tools": len(mcp._tool_manager.list_tools())})
+        payload = {"status": "ok", "mode": "read-and-own-transfers" if own_enabled else "read-only",
+                   "tools": len(mcp._tool_manager.list_tools())}
+        if own_enabled:
+            payload['execution_policy'] = 'chat' if chat_execution else 'native'
+        return JSONResponse(payload)
 
     app = mcp.streamable_http_app()
     if own_enabled:

@@ -223,6 +223,128 @@ class OwnTransferTests(unittest.TestCase):
         self.assertEqual(result['status'], 'forbidden')
         self.assertEqual(self.calls, [])
 
+    def test_chat_execution_requires_scope_and_no_form(self):
+        with patch.dict(os.environ, {'TBANK_OWN_TRANSFER_CONFIRMATION': 'chat'}):
+            mcp, controller = self.installed()
+        self.assertIsNone(mcp._tool_manager.get_tool('confirm_own_transfer'))
+        tool = mcp._tool_manager.get_tool('execute_own_transfer')
+        self.assertIsNotNone(tool)
+        self.assertEqual(set(tool.parameters['properties']), {'transfer_id'})
+        self.assertTrue(tool.annotations.destructiveHint)
+        identifier = controller.prepare('OWN1111', 'OWN2222', '10.25')['transfer_id']
+        read = AccessToken(token='SYNTHETIC', client_id='test', scopes=['bank:read'])
+        with patch('mcp.server.auth.middleware.auth_context.get_access_token', return_value=read):
+            self.assertEqual(asyncio.run(tool.fn(identifier))['status'], 'forbidden')
+        self.assertNotIn('pay', [p for p, _ in self.calls])
+        owner = AccessToken(token='SYNTHETIC', client_id='test', scopes=['bank:read', 'bank:transfer-own'])
+        with patch('mcp.server.auth.middleware.auth_context.get_access_token', return_value=owner):
+            self.assertEqual(asyncio.run(tool.fn(identifier))['status'], 'confirmed')
+            self.assertEqual(asyncio.run(tool.fn(identifier))['status'], 'confirmed')
+        self.assertEqual([p for p, _ in self.calls].count('pay'), 1)
+
+    def test_chat_execution_invalidates_old_native_plan(self):
+        _, native = self.installed()
+        old = native.prepare('OWN1111', 'OWN2222', '10.25')['transfer_id']
+        with patch.dict(os.environ, {'TBANK_OWN_TRANSFER_CONFIRMATION': 'chat'}):
+            mcp, controller = self.installed()
+        tool = mcp._tool_manager.get_tool('execute_own_transfer')
+        owner = AccessToken(token='SYNTHETIC', client_id='test', scopes=['bank:read', 'bank:transfer-own'])
+        with patch('mcp.server.auth.middleware.auth_context.get_access_token', return_value=owner):
+            self.assertEqual(asyncio.run(tool.fn(old))['status'], 'not_sent')
+            new = controller.prepare('OWN1111', 'OWN2222', '10.25')['transfer_id']
+            self.assertNotEqual(new, old)
+            self.assertEqual(native.store.get(old)[0], 'rejected')
+            self.assertEqual(asyncio.run(tool.fn(new))['status'], 'confirmed')
+        self.assertEqual([p for p, _ in self.calls].count('pay'), 1)
+
+    def test_chat_execution_does_not_retry_unknown_outcome(self):
+        with patch.dict(os.environ, {'TBANK_OWN_TRANSFER_CONFIRMATION': 'chat'}):
+            mcp, controller = self.installed()
+        tool = mcp._tool_manager.get_tool('execute_own_transfer')
+        identifier = controller.prepare('OWN1111', 'OWN2222', '10.25')['transfer_id']
+        original = self.session.own_post
+        def lose_response(endpoint, parameters):
+            if endpoint == 'pay':
+                self.calls.append((endpoint, parameters))
+                raise requests.Timeout('SYNTHETIC')
+            return original(endpoint, parameters)
+        self.session.own_post = lose_response
+        owner = AccessToken(token='SYNTHETIC', client_id='test', scopes=['bank:read', 'bank:transfer-own'])
+        with patch('mcp.server.auth.middleware.auth_context.get_access_token', return_value=owner):
+            self.assertEqual(asyncio.run(tool.fn(identifier))['status'], 'unknown')
+            self.assertEqual(asyncio.run(tool.fn(identifier))['status'], 'unknown')
+        with self.assertRaises(TransferError):
+            controller.prepare('OWN1111', 'OWN2222', '10.25')
+        self.assertEqual([p for p, _ in self.calls].count('pay'), 1)
+
+    def test_chat_concurrent_execution_sends_once(self):
+        with patch.dict(os.environ, {'TBANK_OWN_TRANSFER_CONFIRMATION': 'chat'}):
+            mcp, controller = self.installed()
+        identifier = controller.prepare('OWN1111', 'OWN2222', '10.25')['transfer_id']
+        tool = mcp._tool_manager.get_tool('execute_own_transfer')
+        owner = AccessToken(token='SYNTHETIC', client_id='test', scopes=['bank:read', 'bank:transfer-own'])
+        async def run():
+            return await asyncio.gather(*(tool.fn(identifier) for _ in range(8)))
+        with patch('mcp.server.auth.middleware.auth_context.get_access_token', return_value=owner):
+            results = asyncio.run(run())
+        self.assertIn('confirmed', [r['status'] for r in results])
+        self.assertEqual([p for p, _ in self.calls].count('pay'), 1)
+
+    def test_chat_mode_retains_confirmed_native_deduplication(self):
+        _, native = self.installed()
+        identifier = native.prepare('OWN1111', 'OWN2222', '10.25')['transfer_id']
+        self.assertEqual(native.confirm(identifier)['status'], 'confirmed')
+        with patch.dict(os.environ, {'TBANK_OWN_TRANSFER_CONFIRMATION': 'chat'}):
+            mcp, controller = self.installed()
+        plan = controller.prepare('OWN1111', 'OWN2222', '10.25')
+        self.assertEqual(plan['transfer_id'], identifier)
+        self.assertEqual(plan['status'], 'confirmed')
+        tool = mcp._tool_manager.get_tool('execute_own_transfer')
+        owner = AccessToken(token='SYNTHETIC', client_id='test', scopes=['bank:read', 'bank:transfer-own'])
+        with patch('mcp.server.auth.middleware.auth_context.get_access_token', return_value=owner):
+            self.assertEqual(asyncio.run(tool.fn(identifier))['status'], 'confirmed')
+        self.assertEqual([p for p, _ in self.calls].count('pay'), 1)
+
+    def test_chat_expired_plan_is_not_sent(self):
+        with patch.dict(os.environ, {'TBANK_OWN_TRANSFER_CONFIRMATION': 'chat'}):
+            mcp, controller = self.installed()
+        identifier = controller.prepare('OWN1111', 'OWN2222', '10.25')['transfer_id']
+        with controller.store.connect() as db:
+            db.execute('UPDATE plans SET expires=0 WHERE id=?', (identifier,))
+        owner = AccessToken(token='SYNTHETIC', client_id='test', scopes=['bank:read', 'bank:transfer-own'])
+        with patch('mcp.server.auth.middleware.auth_context.get_access_token', return_value=owner):
+            result = asyncio.run(mcp._tool_manager.get_tool('execute_own_transfer').fn(identifier))
+        self.assertEqual(result['status'], 'expired')
+        self.assertNotIn('pay', [p for p, _ in self.calls])
+
+    def test_invalid_execution_policy_is_rejected(self):
+        with patch.dict(os.environ, {'TBANK_OWN_TRANSFER_CONFIRMATION': 'off'}):
+            with self.assertRaises(ValueError):
+                self.installed()
+
+    def test_chat_bank_confirmation_blocks_retry_after_restart(self):
+        with patch.dict(os.environ, {'TBANK_OWN_TRANSFER_CONFIRMATION': 'chat'}):
+            mcp, controller = self.installed()
+        identifier = controller.prepare('OWN1111', 'OWN2222', '10.25')['transfer_id']
+        original = self.session.own_post
+        def need_confirmation(endpoint, parameters):
+            if endpoint == 'pay':
+                self.calls.append((endpoint, parameters))
+                return {'resultCode':'WAITING_CONFIRMATION', 'payload':{}}
+            return original(endpoint, parameters)
+        self.session.own_post = need_confirmation
+        owner = AccessToken(token='SYNTHETIC', client_id='test', scopes=['bank:read', 'bank:transfer-own'])
+        tool = mcp._tool_manager.get_tool('execute_own_transfer')
+        with patch('mcp.server.auth.middleware.auth_context.get_access_token', return_value=owner):
+            result = asyncio.run(tool.fn(identifier))
+            self.assertEqual(result['status'], 'bank_confirmation')
+            self.assertIn('Банк запросил', result['message'])
+            self.assertEqual(asyncio.run(tool.fn(identifier))['status'], 'bank_confirmation')
+        restarted = OwnTransfers(lambda:self.session, controller.store, 'https://example.test', policy='chat')
+        with self.assertRaises(TransferError):
+            restarted.prepare('OWN1111','OWN2222','10.25')
+        self.assertEqual([p for p, _ in self.calls].count('pay'), 1)
+
     def test_two_clients_share_one_loaded_bank_session(self):
         from tbank_mcp import server
         loaded = []

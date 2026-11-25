@@ -1,7 +1,7 @@
-"""Собственные RUB-переводы с подтверждением в клиенте MCP.
+"""Собственные RUB-переводы по выбранной владельцем политике исполнения.
 
 Контракт веб-API проверен на обезличенной записи от 25.11.2026.
-Неизвестный исход не повторяется. Подтверждение не является аргументом tool.
+Неизвестный исход не повторяется. Политика задаётся сервером, не аргументом tool.
 """
 from contextvars import ContextVar
 from contextlib import contextmanager
@@ -29,6 +29,13 @@ from .readonly import ReadOnlyHTTP, ReadOnlyMobileSession, denied
 _BOUND_REQUEST = ContextVar('own_transfer_request', default=None)
 WEB = 'https://www.tbank.ru/api/common/v1/'
 OWN_SCOPE = 'bank:transfer-own'
+
+
+def execution_policy():
+    policy = os.environ.get('TBANK_OWN_TRANSFER_CONFIRMATION', 'native')
+    if policy not in ('native', 'chat'):
+        raise ValueError('TBANK_OWN_TRANSFER_CONFIRMATION must be native or chat')
+    return policy
 
 
 class TransferError(Exception):
@@ -133,12 +140,20 @@ class PlanStore:
         digest = hashlib.sha256(json.dumps([data['source'], data['destination'], data['amount']]).encode()).hexdigest()
         with self.lock, self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            previous = db.execute("SELECT id,state,expires FROM plans WHERE fingerprint=? ORDER BY expires DESC", (digest,)).fetchall()
-            for identifier, state, expires in previous:
-                if state in ('checking', 'posting', 'unknown', 'bank_confirmation'):
-                    raise TransferError('Есть перевод с неподтверждённым исходом. Сначала проверьте его в банке; повтор заблокирован.')
+            previous = db.execute("SELECT id,state,expires,payload FROM plans WHERE fingerprint=? ORDER BY expires DESC", (digest,)).fetchall()
+            if any(state in ('checking', 'posting', 'unknown', 'bank_confirmation') for _, state, _, _ in previous):
+                raise TransferError('Есть перевод с неподтверждённым исходом. Сначала проверьте его в банке; повтор заблокирован.')
+            reusable = None
+            for identifier, state, expires, payload in previous:
+                if state == 'prepared':
+                    old_policy = json.loads(self.cipher.decrypt(payload)).get('execution_policy', 'native')
+                    if old_policy != data.get('execution_policy', 'native'):
+                        db.execute("UPDATE plans SET state='rejected' WHERE id=? AND state='prepared'", (identifier,))
+                        continue
                 if state in ('prepared', 'confirmed') and expires > time.time():
-                    return identifier
+                    reusable = reusable or identifier
+            if reusable:
+                return reusable
             identifier = secrets.token_urlsafe(32)
             db.execute('INSERT INTO plans VALUES (?,?,?,?,?)',
                        (identifier, digest, 'prepared', time.time() + 600, self.seal(data)))
@@ -157,9 +172,10 @@ class PlanStore:
 
 
 class OwnTransfers:
-    def __init__(self, get_session, store, issuer, maximum='100000'):
+    def __init__(self, get_session, store, issuer, maximum='100000', policy='native'):
         self.get_session, self.store, self.issuer = get_session, store, issuer.rstrip('/')
         self.maximum = money(maximum)
+        self.execution_policy = policy
         self.lock = threading.RLock()
         self.last_payment_id = 0
 
@@ -209,22 +225,30 @@ class OwnTransfers:
         amount = money(amount)
         with self.lock, _MINT_LOCK:
             _, _, names = self.quote(source, destination, amount)
-            data = {'source': source, 'destination': destination, 'amount': str(amount), 'names': names}
+            data = {'source': source, 'destination': destination, 'amount': str(amount), 'names': names,
+                    'execution_policy': self.execution_policy}
             identifier = self.store.create(data)
         return {'transfer_id': identifier, **self.status(identifier), 'amount_rub': str(amount), 'commission_rub': '0.00',
                 'source': names[0] + ' ····' + source[-4:],
                 'destination': names[1] + ' ····' + destination[-4:],
-                'message': 'Для prepared вызовите confirm_own_transfer: клиент покажет подтверждение суммы и счетов. Слова агента не заменяют кнопку пользователя.'}
+                'message': ('Для prepared вызовите execute_own_transfer только по прямой команде пользователя перевести указанную сумму между указанными счетами. Отдельной формы подтверждения нет. Запрос только подготовки не разрешает исполнение.'
+                            if self.execution_policy == 'chat' else
+                            'Для prepared вызовите confirm_own_transfer: клиент покажет подтверждение суммы и счетов. Слова агента не заменяют кнопку пользователя.')}
 
     def status(self, identifier):
         state, expires, _ = self.store.get(identifier)
         return {'status': 'expired' if state == 'prepared' and expires <= time.time() else state,
-                'message': 'При unknown/posting/bank_confirmation не создавайте повтор: сначала проверьте банк.'}
+                'message': ('Банк запросил дополнительное подтверждение. Автоматического продолжения нет. '
+                            'Проверьте официальный банк; не повторяйте перевод и не передавайте код в чат.'
+                            if state == 'bank_confirmation' else
+                            'При unknown/posting/checking/bank_confirmation не создавайте повтор: сначала проверьте банк.')}
 
     def confirm(self, identifier):
         with self.lock, _MINT_LOCK:
-            self.store.claim(identifier)
             _, _, data = self.store.get(identifier)
+            if data.get('execution_policy', 'native') != self.execution_policy:
+                raise TransferError('Режим исполнения изменился. Подготовьте новый план по текущей команде пользователя.')
+            self.store.claim(identifier)
             try:
                 session, parameters, _ = self.quote(data['source'], data['destination'], money(data['amount']))
             except Exception:
@@ -252,16 +276,22 @@ class OwnTransfers:
 
 
 def install(mcp, provider, get_session):
+    policy = execution_policy()
     store = PlanStore(Path(provider.store.path).with_name('own-transfers.sqlite'), provider.store.cipher)
-    controller = OwnTransfers(get_session, store, provider.issuer, os.environ.get('TBANK_OWN_TRANSFER_MAX_RUB', '100000'))
+    controller = OwnTransfers(get_session, store, provider.issuer, os.environ.get('TBANK_OWN_TRANSFER_MAX_RUB', '100000'), policy)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True))
+    prepare_description = ('Подготовить RUB-перевод между своими счетами. Деньги НЕ отправляются. '
+        'ID брать из list_accounts. При неоднозначных счетах или отсутствии суммы уточнить. '
+        + ('По прямой команде пользователя перевести деньги затем вызвать execute_own_transfer. '
+           'При просьбе только показать, проверить или подготовить перевод исполнение запрещено.'
+           if policy == 'chat' else 'Затем confirm_own_transfer показывает пользователю форму подтверждения.'))
+
+    @mcp.tool(description=prepare_description, annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True))
     async def prepare_own_transfer(source_account_id: str, destination_account_id: str, amount_rub: str) -> dict:
         """Подготовить RUB-перевод между своими счетами. Деньги НЕ отправляются.
 
-        Затем confirm_own_transfer показывает встроенный диалог клиенту MCP.
-        Подтверждение только кнопкой пользователя в ChatGPT/Hermes. При
-        неоднозначном названии счёта уточнить выбор. ID берутся из list_accounts.
+        Дальнейшее исполнение зависит от политики сервера. При неоднозначном
+        названии счёта уточнить выбор. ID берутся из list_accounts.
         """
         try:
             return await run_in_threadpool(controller.prepare, source_account_id, destination_account_id, amount_rub)
@@ -277,6 +307,37 @@ def install(mcp, provider, get_session):
             return controller.status(transfer_id)
         except TransferError:
             return {'status': 'not_found'}
+
+    if policy == 'chat':
+        @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True))
+        async def execute_own_transfer(transfer_id: str) -> dict:
+            """Выполнить реальный собственный RUB-перевод БЕЗ дополнительной формы подтверждения.
+
+            Только по прямой команде пользователя перевести явно указанную сумму с явно
+            выбранного своего счёта на другой свой счёт. Сначала list_accounts и
+            prepare_own_transfer; сюда передаётся ID неизменяемого плана. Запросы только
+            подготовки/расчёта, обсуждение, примеры и цитаты НЕ разрешают исполнение.
+            При недостаточных или неоднозначных данных уточнить. Не подставлять сумму
+            и направление из старого перевода. При unknown/posting/checking/bank_confirmation
+            не создавать повтор и не отправлять заново: проверить операции в банке.
+            """
+            from mcp.server.auth.middleware.auth_context import get_access_token
+            access = get_access_token()
+            if access is None or OWN_SCOPE not in access.scopes:
+                return {'status': 'forbidden', 'message': 'Подключение разрешает только чтение. Требуется bank:transfer-own.'}
+            try:
+                state, expires, data = store.get(transfer_id)
+                if state != 'prepared' or expires <= time.time():
+                    return controller.status(transfer_id)
+                if data.get('execution_policy', 'native') != 'chat':
+                    return {'status': 'not_sent', 'message': 'План создан для другого режима. Подготовьте новый план по текущей команде пользователя.'}
+                return await run_in_threadpool(controller.confirm, transfer_id)
+            except TransferError as error:
+                return {'status': 'not_sent', 'message': str(error)}
+            except Exception:
+                return {'status': 'unknown', 'message': 'Не удалось определить результат. Не повторяйте перевод, проверьте банк.'}
+
+        return controller
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True))
     async def confirm_own_transfer(transfer_id: str, ctx: Context) -> dict:
